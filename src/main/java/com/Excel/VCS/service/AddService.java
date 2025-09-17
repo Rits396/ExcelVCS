@@ -186,7 +186,7 @@ public class AddService {
             logger.debug("Storage path - directory: {}, filename: {}", dirName, fileName);
 
             // Create directory structure and store file
-            Path objectsDir = Paths.get(".git", "objects");
+            Path objectsDir = Paths.get(".VCS", "objects");
             Path subDir = objectsDir.resolve(dirName);
             Path filePath = subDir.resolve(fileName);
 

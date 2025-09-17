@@ -1,15 +1,15 @@
 package com.Excel.VCS.service;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -20,10 +20,34 @@ import java.util.stream.Collectors;
 public class IndexService {
 
     private static final Logger logger = LoggerFactory.getLogger(IndexService.class);
-    private static final String INDEX_FILE_PATH = ".git/index";
+
+    // Use Path objects instead of String for OS compatibility
+    private static final Path VCS_DIR = Paths.get(".VCS");
+    private static final Path INDEX_FILE_PATH = VCS_DIR.resolve("index");
     private static final String TEMP_INDEX_SUFFIX = ".tmp";
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ReadWriteLock indexLock = new ReentrantReadWriteLock();
+
+    /**
+     * Initialize VCS directory on startup
+     */
+    @PostConstruct
+    public void initializeVCSDirectory() {
+        try {
+            Files.createDirectories(VCS_DIR);
+            logger.info("Initialized VCS directory at: {}", VCS_DIR.toAbsolutePath());
+
+            // Create empty index file if it doesn't exist
+            if (!Files.exists(INDEX_FILE_PATH)) {
+                saveIndex(new HashMap<>());
+                logger.info("Created initial index file at: {}", INDEX_FILE_PATH);
+            }
+        } catch (IOException e) {
+            logger.error("Failed to initialize VCS directory", e);
+            throw new RuntimeException("Failed to initialize VCS directory", e);
+        }
+    }
 
     /**
      * Index entry representing a staged cell change
@@ -33,7 +57,7 @@ public class IndexService {
         private int sheetNumber;
         private String row;
         private int col;
-        private String blobId;
+        private String blobId; // This is your hash ID
         private long timestamp;
         private int originalSize;
         private int compressedSize;
@@ -52,7 +76,7 @@ public class IndexService {
             this.timestamp = Instant.now().getEpochSecond();
             this.originalSize = originalSize;
             this.compressedSize = compressedSize;
-            this.cellAddress = row + col;
+            this.cellAddress = row.toUpperCase()+ ":"+ col;
         }
 
         // Getters and Setters
@@ -86,6 +110,7 @@ public class IndexService {
         /**
          * Generate unique key for this index entry
          */
+        @JsonIgnore
         public String getKey() {
             return workbookId + ":" + sheetNumber + ":" + row + ":" + col;
         }
@@ -98,31 +123,60 @@ public class IndexService {
     }
 
     /**
-     * Add or update an entry in the index
+     * Add or update an entry in the index with hash comparison
      */
-    public void addToIndex(String workbookId, int sheetNumber, String row, int col,
-                           String blobId, int originalSize, int compressedSize) {
+    public boolean addToIndex(String workbookId, int sheetNumber, String row, int col,
+                              String newBlobId, int originalSize, int compressedSize) {
 
         logger.info("Adding to index: workbook={}, sheet={}, cell={}{}, blobId={}",
-                workbookId, sheetNumber, row, col, blobId);
+                workbookId, sheetNumber, row, col, newBlobId);
 
-        IndexEntry entry = new IndexEntry(workbookId, sheetNumber, row, col, blobId, originalSize, compressedSize);
+        String key = workbookId + ":" + sheetNumber + ":" + row.toUpperCase() + ":" + col;
 
         indexLock.writeLock().lock();
         try {
             Map<String, IndexEntry> index = loadIndex();
-            String key = entry.getKey();
 
+            // Check if entry already exists for this cell
             if (index.containsKey(key)) {
-                logger.debug("Updating existing index entry for key: {}", key);
+                IndexEntry existingEntry = index.get(key);
+                String existingBlobId = existingEntry.getBlobId();
+
+                logger.debug("Found existing entry for key: {} with blobId: {}", key, existingBlobId);
+
+                // Compare hash IDs (blob IDs)
+                if (newBlobId.equals(existingBlobId)) {
+                    logger.info("Hash ID unchanged for cell {}{}, no update needed", row, col);
+                    return false; // No change needed
+                } else {
+                    logger.info("Hash ID changed for cell {}{}: {} -> {}",
+                            row, col, existingBlobId, newBlobId);
+
+                    // Update existing entry with new hash ID and timestamp
+                    existingEntry.setBlobId(newBlobId);
+                    existingEntry.setTimestamp(Instant.now().getEpochSecond());
+                    existingEntry.setOriginalSize(originalSize);
+                    existingEntry.setCompressedSize(compressedSize);
+
+                    // Update index using incremental update
+                    updateIndexEntry(index, key, existingEntry);
+
+                    logger.info("Successfully updated index entry: {}", existingEntry);
+                    return true; // Entry was updated
+                }
             } else {
                 logger.debug("Adding new index entry for key: {}", key);
+
+                // Create new entry
+                IndexEntry newEntry = new IndexEntry(workbookId, sheetNumber, row.toUpperCase(), col,
+                        newBlobId, originalSize, compressedSize);
+
+                // Add new entry using incremental update
+                updateIndexEntry(index, key, newEntry);
+
+                logger.info("Successfully added new index entry: {}", newEntry);
+                return true; // New entry was added
             }
-
-            index.put(key, entry);
-            saveIndex(index);
-
-            logger.info("Successfully added/updated index entry: {}", entry);
 
         } catch (Exception e) {
             logger.error("Failed to add entry to index", e);
@@ -133,10 +187,47 @@ public class IndexService {
     }
 
     /**
+     * Get existing entry for a specific cell
+     */
+    public IndexEntry getIndexEntry(String workbookId, int sheetNumber, String row, int col) {
+        String key = workbookId + ":" + sheetNumber + ":" + row.toUpperCase() + ":" + col;
+
+        indexLock.readLock().lock();
+        try {
+            Map<String, IndexEntry> index = loadIndex();
+            return index.get(key);
+        } catch (Exception e) {
+            logger.error("Failed to get index entry for key: {}", key, e);
+            return null;
+        } finally {
+            indexLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Check if hash ID exists for a specific cell
+     */
+    public String getHashIdForCell(String workbookId, int sheetNumber, String row, int col) {
+        IndexEntry entry = getIndexEntry(workbookId, sheetNumber, row.toUpperCase(), col);
+        return entry != null ? entry.getBlobId() : null;
+    }
+
+    /**
+     * Update a single index entry incrementally (without full rewrite)
+     */
+    private void updateIndexEntry(Map<String, IndexEntry> currentIndex, String key, IndexEntry entry) {
+        // Update the in-memory index
+        currentIndex.put(key, entry);
+
+        // Save the updated index
+        saveIndex(currentIndex);
+    }
+
+    /**
      * Remove an entry from the index
      */
     public boolean removeFromIndex(String workbookId, int sheetNumber, String row, int col) {
-        String key = workbookId + ":" + sheetNumber + ":" + row + ":" + col;
+        String key = workbookId + ":" + sheetNumber + ":" + row.toUpperCase() + ":" + col;
         logger.info("Removing from index: {}", key);
 
         indexLock.writeLock().lock();
@@ -158,6 +249,90 @@ public class IndexService {
             throw new RuntimeException("Failed to remove entry from index: " + e.getMessage(), e);
         } finally {
             indexLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Batch update multiple entries (for performance when updating many cells)
+     */
+    public Map<String, Boolean> batchAddToIndex(List<BatchIndexEntry> entries) {
+        logger.info("Batch updating {} entries", entries.size());
+
+        Map<String, Boolean> results = new HashMap<>();
+
+        indexLock.writeLock().lock();
+        try {
+            Map<String, IndexEntry> index = loadIndex();
+            boolean indexModified = false;
+
+            for (BatchIndexEntry batchEntry : entries) {
+                String key = batchEntry.workbookId + ":" + batchEntry.sheetNumber + ":" +
+                        batchEntry.row + ":" + batchEntry.col;
+
+                boolean entryModified = false;
+
+                if (index.containsKey(key)) {
+                    IndexEntry existingEntry = index.get(key);
+                    String existingBlobId = existingEntry.getBlobId();
+
+                    if (!batchEntry.newBlobId.equals(existingBlobId)) {
+                        existingEntry.setBlobId(batchEntry.newBlobId);
+                        existingEntry.setTimestamp(Instant.now().getEpochSecond());
+                        existingEntry.setOriginalSize(batchEntry.originalSize);
+                        existingEntry.setCompressedSize(batchEntry.compressedSize);
+                        entryModified = true;
+                        indexModified = true;
+                    }
+                } else {
+                    IndexEntry newEntry = new IndexEntry(batchEntry.workbookId, batchEntry.sheetNumber,
+                            batchEntry.row, batchEntry.col, batchEntry.newBlobId,
+                            batchEntry.originalSize, batchEntry.compressedSize);
+                    index.put(key, newEntry);
+                    entryModified = true;
+                    indexModified = true;
+                }
+
+                results.put(key, entryModified);
+            }
+
+            // Save only once after all updates
+            if (indexModified) {
+                saveIndex(index);
+                logger.info("Successfully batch updated index with {} modified entries",
+                        results.values().stream().mapToInt(b -> b ? 1 : 0).sum());
+            }
+
+            return results;
+
+        } catch (Exception e) {
+            logger.error("Failed to batch update index", e);
+            throw new RuntimeException("Failed to batch update index: " + e.getMessage(), e);
+        } finally {
+            indexLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Helper class for batch operations
+     */
+    public static class BatchIndexEntry {
+        public String workbookId;
+        public int sheetNumber;
+        public String row;
+        public int col;
+        public String newBlobId;
+        public int originalSize;
+        public int compressedSize;
+
+        public BatchIndexEntry(String workbookId, int sheetNumber, String row, int col,
+                               String newBlobId, int originalSize, int compressedSize) {
+            this.workbookId = workbookId;
+            this.sheetNumber = sheetNumber;
+            this.row = row.toUpperCase();
+            this.col = col;
+            this.newBlobId = newBlobId;
+            this.originalSize = originalSize;
+            this.compressedSize = compressedSize;
         }
     }
 
@@ -218,7 +393,7 @@ public class IndexService {
      * Check if a specific cell is staged
      */
     public boolean isStaged(String workbookId, int sheetNumber, String row, int col) {
-        String key = workbookId + ":" + sheetNumber + ":" + row + ":" + col;
+        String key = workbookId + ":" + sheetNumber + ":" + row.toUpperCase() + ":" + col;
 
         indexLock.readLock().lock();
         try {
@@ -272,7 +447,6 @@ public class IndexService {
             stats.put("totalOriginalSize", totalOriginalSize);
             stats.put("totalCompressedSize", totalCompressedSize);
             stats.put("overallCompressionRatio", totalOriginalSize > 0 ? (double) totalCompressedSize / totalOriginalSize : 0);
-
             return stats;
 
         } catch (Exception e) {
@@ -287,16 +461,14 @@ public class IndexService {
      * Load index from file
      */
     private Map<String, IndexEntry> loadIndex() {
-        Path indexPath = Paths.get(INDEX_FILE_PATH);
-
-        if (!Files.exists(indexPath)) {
-            logger.debug("Index file does not exist, creating new empty index");
-            return new HashMap<>();
-        }
-
         try {
-            logger.debug("Loading index from file: {}", indexPath);
-            String content = Files.readString(indexPath, StandardCharsets.UTF_8);
+            if (!Files.exists(INDEX_FILE_PATH)) {
+                logger.debug("Index file does not exist at {}, returning empty index", INDEX_FILE_PATH);
+                return new HashMap<>();
+            }
+
+            logger.debug("Loading index from file: {}", INDEX_FILE_PATH);
+            String content = Files.readString(INDEX_FILE_PATH, StandardCharsets.UTF_8);
 
             if (content.trim().isEmpty()) {
                 logger.debug("Index file is empty, returning new index");
@@ -310,8 +482,11 @@ public class IndexService {
             logger.debug("Loaded {} entries from index", index.size());
             return index;
 
+        } catch (IOException e) {
+            logger.error("IO error loading index file: {}", e.getMessage());
+            return new HashMap<>();
         } catch (Exception e) {
-            logger.error("Failed to load index file, creating new empty index", e);
+            logger.error("Failed to parse index file, returning empty index", e);
             return new HashMap<>();
         }
     }
@@ -320,14 +495,13 @@ public class IndexService {
      * Save index to file atomically
      */
     private void saveIndex(Map<String, IndexEntry> index) {
-        Path indexPath = Paths.get(INDEX_FILE_PATH);
-        Path tempPath = Paths.get(INDEX_FILE_PATH + TEMP_INDEX_SUFFIX);
+        Path tempPath = INDEX_FILE_PATH.resolveSibling(INDEX_FILE_PATH.getFileName() + TEMP_INDEX_SUFFIX);
 
         try {
-            logger.debug("Saving index with {} entries", index.size());
+            logger.debug("Saving index with {} entries to {}", index.size(), INDEX_FILE_PATH);
 
-            // Ensure .git directory exists
-            Files.createDirectories(indexPath.getParent());
+            // Ensure VCS directory exists
+            Files.createDirectories(INDEX_FILE_PATH.getParent());
 
             // Write to temporary file first
             String jsonContent = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(index);
@@ -335,18 +509,29 @@ public class IndexService {
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
             // Atomic move to final location
-            Files.move(tempPath, indexPath);
+            Files.move(tempPath, INDEX_FILE_PATH, StandardCopyOption.REPLACE_EXISTING);
 
-            logger.debug("Successfully saved index to {}", indexPath);
+            logger.debug("Successfully saved index to {}", INDEX_FILE_PATH);
 
-        } catch (Exception e) {
-            logger.error("Failed to save index file", e);
+        } catch (IOException e) {
+            logger.error("IO error saving index file: {}", e.getMessage(), e);
 
             // Clean up temp file if it exists
             try {
                 Files.deleteIfExists(tempPath);
-            } catch (Exception cleanupException) {
-                logger.warn("Failed to clean up temporary index file", cleanupException);
+            } catch (IOException cleanupException) {
+                logger.warn("Failed to clean up temporary index file: {}", cleanupException.getMessage());
+            }
+
+            throw new RuntimeException("Failed to save index: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error saving index file", e);
+
+            // Clean up temp file if it exists
+            try {
+                Files.deleteIfExists(tempPath);
+            } catch (IOException cleanupException) {
+                logger.warn("Failed to clean up temporary index file: {}", cleanupException.getMessage());
             }
 
             throw new RuntimeException("Failed to save index: " + e.getMessage(), e);

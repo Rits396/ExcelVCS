@@ -6,6 +6,7 @@ import com.Excel.VCS.model.Workbook;
 import com.Excel.VCS.repository.WorkbookRepository;
 import com.Excel.VCS.service.AddService;
 import com.Excel.VCS.service.WorkbookService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -86,7 +87,7 @@ public class AddController {
             // Read the compressed file
             String dirName = blobId.substring(0, 2);
             String fileName = blobId.substring(2);
-            Path filePath = Paths.get(".git", "objects", dirName, fileName);
+            Path filePath = Paths.get(".VCS", "objects", dirName, fileName);
 
             if (!Files.exists(filePath)) {
                 return ResponseEntity.notFound().build();
@@ -181,6 +182,252 @@ public class AddController {
 
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+
+
+    // Add these methods to your existing AddController class
+
+    @GetMapping("/index/raw")
+    public ResponseEntity<Object> readIndexFileRaw() {
+        logger.info("Reading raw index file");
+
+        try {
+            Path indexPath = Paths.get(".VCS", "index");
+
+            if (!Files.exists(indexPath)) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "not_found",
+                        "message", "Index file does not exist",
+                        "path", indexPath.toAbsolutePath().toString()
+                ));
+            }
+
+            // Read file as string
+            String content = Files.readString(indexPath, StandardCharsets.UTF_8);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "success");
+            result.put("path", indexPath.toAbsolutePath().toString());
+            result.put("size", Files.size(indexPath));
+            result.put("lastModified", Files.getLastModifiedTime(indexPath).toString());
+            result.put("content", content);
+            result.put("isEmpty", content.trim().isEmpty());
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            logger.error("Failed to read index file", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to read index file",
+                    "message", e.getMessage(),
+                    "status", "error"
+            ));
+        }
+    }
+
+    @GetMapping("/index/parsed")
+    public ResponseEntity<Object> readIndexFileParsed() {
+        logger.info("Reading and parsing index file");
+
+        try {
+            Path indexPath = Paths.get(".VCS", "index");
+
+            if (!Files.exists(indexPath)) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "not_found",
+                        "message", "Index file does not exist",
+                        "path", indexPath.toAbsolutePath().toString()
+                ));
+            }
+
+            String content = Files.readString(indexPath, StandardCharsets.UTF_8);
+
+            if (content.trim().isEmpty()) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "empty",
+                        "message", "Index file is empty",
+                        "path", indexPath.toAbsolutePath().toString()
+                ));
+            }
+
+            // Parse JSON content
+            ObjectMapper mapper = new ObjectMapper();
+            Map<String, Object> indexData = mapper.readValue(content, Map.class);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "success");
+            result.put("path", indexPath.toAbsolutePath().toString());
+            result.put("entryCount", indexData.size());
+            result.put("entries", indexData);
+
+            // Add statistics
+            Map<String, Object> stats = new HashMap<>();
+            stats.put("totalEntries", indexData.size());
+
+            // Count by workbook
+            Map<String, Integer> workbookCounts = new HashMap<>();
+            for (Object entry : indexData.values()) {
+                if (entry instanceof Map) {
+                    Map<String, Object> entryMap = (Map<String, Object>) entry;
+                    String workbookId = (String) entryMap.get("workbookId");
+                    if (workbookId != null) {
+                        workbookCounts.put(workbookId, workbookCounts.getOrDefault(workbookId, 0) + 1);
+                    }
+                }
+            }
+            stats.put("entriesByWorkbook", workbookCounts);
+
+            result.put("statistics", stats);
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            logger.error("Failed to parse index file", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to parse index file",
+                    "message", e.getMessage(),
+                    "status", "error"
+            ));
+        }
+    }
+
+    @GetMapping("/index/info")
+    public ResponseEntity<Object> getIndexFileInfo() {
+        logger.info("Getting index file information");
+
+        try {
+            Path indexPath = Paths.get(".VCS", "index");
+            Path vcsDir = Paths.get(".VCS");
+
+            Map<String, Object> result = new HashMap<>();
+
+            // VCS directory info
+            Map<String, Object> dirInfo = new HashMap<>();
+            dirInfo.put("exists", Files.exists(vcsDir));
+            dirInfo.put("path", vcsDir.toAbsolutePath().toString());
+            if (Files.exists(vcsDir)) {
+                dirInfo.put("readable", Files.isReadable(vcsDir));
+                dirInfo.put("writable", Files.isWritable(vcsDir));
+            }
+            result.put("vcsDirectory", dirInfo);
+
+            // Index file info
+            Map<String, Object> fileInfo = new HashMap<>();
+            fileInfo.put("exists", Files.exists(indexPath));
+            fileInfo.put("path", indexPath.toAbsolutePath().toString());
+
+            if (Files.exists(indexPath)) {
+                fileInfo.put("size", Files.size(indexPath));
+                fileInfo.put("sizeFormatted", formatFileSize(Files.size(indexPath)));
+                fileInfo.put("lastModified", Files.getLastModifiedTime(indexPath).toString());
+                fileInfo.put("readable", Files.isReadable(indexPath));
+                fileInfo.put("writable", Files.isWritable(indexPath));
+
+                // Check if it's valid JSON
+                try {
+                    String content = Files.readString(indexPath, StandardCharsets.UTF_8);
+                    fileInfo.put("isEmpty", content.trim().isEmpty());
+
+                    if (!content.trim().isEmpty()) {
+                        ObjectMapper mapper = new ObjectMapper();
+                        Map<String, Object> parsed = mapper.readValue(content, Map.class);
+                        fileInfo.put("validJson", true);
+                        fileInfo.put("entryCount", parsed.size());
+                    } else {
+                        fileInfo.put("validJson", true);
+                        fileInfo.put("entryCount", 0);
+                    }
+                } catch (Exception e) {
+                    fileInfo.put("validJson", false);
+                    fileInfo.put("parseError", e.getMessage());
+                }
+            }
+
+            result.put("indexFile", fileInfo);
+            result.put("status", "success");
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            logger.error("Failed to get index file info", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to get index file info",
+                    "message", e.getMessage(),
+                    "status", "error"
+            ));
+        }
+    }
+
+    @GetMapping("/index/entries/{workbookId}")
+    public ResponseEntity<Object> getIndexEntriesForWorkbook(@PathVariable String workbookId) {
+        logger.info("Getting index entries for workbook: {}", workbookId);
+
+        try {
+            Path indexPath = Paths.get(".VCS", "index");
+
+            if (!Files.exists(indexPath)) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "not_found",
+                        "message", "Index file does not exist",
+                        "workbookId", workbookId
+                ));
+            }
+
+            String content = Files.readString(indexPath, StandardCharsets.UTF_8);
+
+            if (content.trim().isEmpty()) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "empty",
+                        "message", "Index file is empty",
+                        "workbookId", workbookId,
+                        "entries", new HashMap<>()
+                ));
+            }
+
+            ObjectMapper mapper = new ObjectMapper();
+            Map<String, Object> indexData = mapper.readValue(content, Map.class);
+
+            // Filter entries for the specific workbook
+            Map<String, Object> workbookEntries = new HashMap<>();
+            for (Map.Entry<String, Object> entry : indexData.entrySet()) {
+                if (entry.getValue() instanceof Map) {
+                    Map<String, Object> entryData = (Map<String, Object>) entry.getValue();
+                    if (workbookId.equals(entryData.get("workbookId"))) {
+                        workbookEntries.put(entry.getKey(), entryData);
+                    }
+                }
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "success");
+            result.put("workbookId", workbookId);
+            result.put("entryCount", workbookEntries.size());
+            result.put("entries", workbookEntries);
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            logger.error("Failed to get index entries for workbook: {}", workbookId, e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to get index entries",
+                    "message", e.getMessage(),
+                    "status", "error",
+                    "workbookId", workbookId
+            ));
+        }
+    }
+
+    private String formatFileSize(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        } else if (bytes < 1024 * 1024) {
+            return String.format("%.1f KB", bytes / 1024.0);
+        } else if (bytes < 1024 * 1024 * 1024) {
+            return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+        } else {
+            return String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
         }
     }
 }

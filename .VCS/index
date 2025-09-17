@@ -1,0 +1,57 @@
+{
+  "121:1:A:4" : {
+    "workbookId" : "121",
+    "sheetNumber" : 1,
+    "row" : "A",
+    "col" : 4,
+    "blobId" : "e9e7a88a3ae56c730f8129f934d66321b1e8c18ae21a856932c57a381816f83f",
+    "timestamp" : 1758102378,
+    "originalSize" : 19,
+    "compressedSize" : 27,
+    "cellAddress" : "A:4"
+  },
+  "121:1:a:4" : {
+    "workbookId" : "121",
+    "sheetNumber" : 1,
+    "row" : "a",
+    "col" : 4,
+    "blobId" : "9f9e4b94d4472118f07ac01c9dc0eda2efb274d08a73741c7a361b3702d04917",
+    "timestamp" : 1758102481,
+    "originalSize" : 16,
+    "compressedSize" : 24,
+    "cellAddress" : "a:4"
+  },
+  "121:1:A:1" : {
+    "workbookId" : "121",
+    "sheetNumber" : 1,
+    "row" : "A",
+    "col" : 1,
+    "blobId" : "c11719d72f17cc6b3152b16b875f209393c31b4b49f8980db70f04c5c7633c28",
+    "timestamp" : 1758104767,
+    "originalSize" : 12,
+    "compressedSize" : 20,
+    "cellAddress" : "A:1"
+  },
+  "121:1:a:1" : {
+    "workbookId" : "121",
+    "sheetNumber" : 1,
+    "row" : "a",
+    "col" : 1,
+    "blobId" : "5f532cf29f3bd63f255b723818e2223dded7a97b30483c34e1ff13bf5b27d49b",
+    "timestamp" : 1758102621,
+    "originalSize" : 13,
+    "compressedSize" : 21,
+    "cellAddress" : "A:1"
+  },
+  "121:1:A:2" : {
+    "workbookId" : "121",
+    "sheetNumber" : 1,
+    "row" : "A",
+    "col" : 2,
+    "blobId" : "5a8ebbb362ee3aa999beb47cd61501f5bc6b78a4013ffa2c4f48726088cb0019",
+    "timestamp" : 1758101608,
+    "originalSize" : 9,
+    "compressedSize" : 17,
+    "cellAddress" : "A:2"
+  }
+}
