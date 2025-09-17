@@ -27,13 +27,16 @@ public class WorkbookController {
     }
 
     @PostMapping("/save")
-    public ResponseEntity<Workbook> saveWorkbook(@RequestBody Workbook workbook) {
+    public ResponseEntity<Workbook> saveWorkbook(@RequestBody Workbook workbook)
+    {
         Workbook saved = workbookService.saveWorkbook(workbook);
         return ResponseEntity.ok(saved);
     }
 
     @Data
-    public static class CellUpdateRequest {
+    public static class CellUpdateRequest
+
+    {
         private String row;   // e.g., "A"
         private int col;      // e.g., 2
         private String value; // e.g., "Hi"
