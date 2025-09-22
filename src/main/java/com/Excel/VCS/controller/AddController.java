@@ -5,6 +5,7 @@ import com.Excel.VCS.model.Sheet;
 import com.Excel.VCS.model.Workbook;
 import com.Excel.VCS.repository.WorkbookRepository;
 import com.Excel.VCS.service.AddService;
+import com.Excel.VCS.service.IndexService;
 import com.Excel.VCS.service.WorkbookService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -16,8 +17,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 import java.util.zip.Inflater;
 
 @RestController
@@ -29,10 +30,14 @@ public class AddController {
     AddService addService;
     WorkbookService workbookService;
     WorkbookRepository workbookRepository;
-    public AddController(AddService addService, WorkbookService workbookService, WorkbookRepository workbookRepository) {
+    IndexService indexService;
+
+    public AddController(AddService addService, WorkbookService workbookService,
+                         WorkbookRepository workbookRepository, IndexService indexService) {
         this.addService = addService;
         this.workbookService = workbookService;
-        this.workbookRepository=workbookRepository;
+        this.workbookRepository = workbookRepository;
+        this.indexService = indexService;
     }
 
     @PostMapping("/add/{workbookId}/sheets/{sheetNumber}/cell")
@@ -78,8 +83,6 @@ public class AddController {
             ));
         }
     }
-
-
 
     @GetMapping("/verify-blob/{blobId}")
     public ResponseEntity<Object> verifyBlob(@PathVariable String blobId) {
@@ -185,13 +188,11 @@ public class AddController {
         }
     }
 
-
-
-    // Add these methods to your existing AddController class
+    // Updated index endpoints for Git-like format
 
     @GetMapping("/index/raw")
     public ResponseEntity<Object> readIndexFileRaw() {
-        logger.info("Reading raw index file");
+        logger.info("Reading raw index file (Git format)");
 
         try {
             Path indexPath = Paths.get(".VCS", "index");
@@ -204,15 +205,25 @@ public class AddController {
                 ));
             }
 
-            // Read file as string
+            // Read file as string (Git format is plain text)
             String content = Files.readString(indexPath, StandardCharsets.UTF_8);
+            List<String> lines = Arrays.asList(content.split("\n"));
+
+            // Filter out empty lines for stats
+            List<String> nonEmptyLines = lines.stream()
+                    .filter(line -> !line.trim().isEmpty() && !line.startsWith("#"))
+                    .collect(Collectors.toList());
 
             Map<String, Object> result = new HashMap<>();
             result.put("status", "success");
+            result.put("format", "git-like");
             result.put("path", indexPath.toAbsolutePath().toString());
             result.put("size", Files.size(indexPath));
             result.put("lastModified", Files.getLastModifiedTime(indexPath).toString());
             result.put("content", content);
+            result.put("lines", lines);
+            result.put("totalLines", lines.size());
+            result.put("entryCount", nonEmptyLines.size());
             result.put("isEmpty", content.trim().isEmpty());
 
             return ResponseEntity.ok(result);
@@ -229,7 +240,7 @@ public class AddController {
 
     @GetMapping("/index/parsed")
     public ResponseEntity<Object> readIndexFileParsed() {
-        logger.info("Reading and parsing index file");
+        logger.info("Reading and parsing index file (Git format)");
 
         try {
             Path indexPath = Paths.get(".VCS", "index");
@@ -252,32 +263,68 @@ public class AddController {
                 ));
             }
 
-            // Parse JSON content
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, Object> indexData = mapper.readValue(content, Map.class);
+            // Parse Git-like format entries
+            List<String> lines = Arrays.asList(content.split("\n"));
+            List<Map<String, Object>> parsedEntries = new ArrayList<>();
+            List<String> parseErrors = new ArrayList<>();
+
+            for (int i = 0; i < lines.size(); i++) {
+                String line = lines.get(i).trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue; // Skip empty lines and comments
+                }
+
+                try {
+                    IndexService.IndexEntry entry = IndexService.IndexEntry.fromGitIndexLine(line);
+                    if (entry != null) {
+                        Map<String, Object> entryMap = new HashMap<>();
+                        entryMap.put("workbookId", entry.getWorkbookId());
+                        entryMap.put("sheetNumber", entry.getSheetNumber());
+                        entryMap.put("row", entry.getRow());
+                        entryMap.put("col", entry.getCol());
+                        entryMap.put("blobId", entry.getBlobId());
+                        entryMap.put("cellAddress", entry.getCellAddress());
+                        entryMap.put("gitPath", entry.getGitPath());
+                        entryMap.put("timestamp", entry.getTimestamp());
+                        entryMap.put("key", entry.getKey());
+                        entryMap.put("lineNumber", i + 1);
+                        entryMap.put("originalLine", line);
+                        parsedEntries.add(entryMap);
+                    }
+                } catch (Exception e) {
+                    parseErrors.add("Line " + (i + 1) + ": " + e.getMessage() + " [" + line + "]");
+                }
+            }
 
             Map<String, Object> result = new HashMap<>();
             result.put("status", "success");
+            result.put("format", "git-like");
             result.put("path", indexPath.toAbsolutePath().toString());
-            result.put("entryCount", indexData.size());
-            result.put("entries", indexData);
+            result.put("entryCount", parsedEntries.size());
+            result.put("entries", parsedEntries);
+            result.put("parseErrors", parseErrors);
+            result.put("hasParseErrors", !parseErrors.isEmpty());
 
             // Add statistics
             Map<String, Object> stats = new HashMap<>();
-            stats.put("totalEntries", indexData.size());
+            stats.put("totalEntries", parsedEntries.size());
+            stats.put("parseErrors", parseErrors.size());
 
             // Count by workbook
-            Map<String, Integer> workbookCounts = new HashMap<>();
-            for (Object entry : indexData.values()) {
-                if (entry instanceof Map) {
-                    Map<String, Object> entryMap = (Map<String, Object>) entry;
-                    String workbookId = (String) entryMap.get("workbookId");
-                    if (workbookId != null) {
-                        workbookCounts.put(workbookId, workbookCounts.getOrDefault(workbookId, 0) + 1);
-                    }
-                }
-            }
+            Map<String, Long> workbookCounts = parsedEntries.stream()
+                    .collect(Collectors.groupingBy(
+                            entry -> (String) entry.get("workbookId"),
+                            Collectors.counting()
+                    ));
             stats.put("entriesByWorkbook", workbookCounts);
+
+            // Count by sheet
+            Map<String, Long> sheetCounts = parsedEntries.stream()
+                    .collect(Collectors.groupingBy(
+                            entry -> entry.get("workbookId") + "/sheet" + entry.get("sheetNumber"),
+                            Collectors.counting()
+                    ));
+            stats.put("entriesBySheet", sheetCounts);
 
             result.put("statistics", stats);
 
@@ -317,6 +364,7 @@ public class AddController {
             Map<String, Object> fileInfo = new HashMap<>();
             fileInfo.put("exists", Files.exists(indexPath));
             fileInfo.put("path", indexPath.toAbsolutePath().toString());
+            fileInfo.put("format", "git-like");
 
             if (Files.exists(indexPath)) {
                 fileInfo.put("size", Files.size(indexPath));
@@ -325,22 +373,44 @@ public class AddController {
                 fileInfo.put("readable", Files.isReadable(indexPath));
                 fileInfo.put("writable", Files.isWritable(indexPath));
 
-                // Check if it's valid JSON
+                // Parse Git-like format
                 try {
                     String content = Files.readString(indexPath, StandardCharsets.UTF_8);
                     fileInfo.put("isEmpty", content.trim().isEmpty());
 
                     if (!content.trim().isEmpty()) {
-                        ObjectMapper mapper = new ObjectMapper();
-                        Map<String, Object> parsed = mapper.readValue(content, Map.class);
-                        fileInfo.put("validJson", true);
-                        fileInfo.put("entryCount", parsed.size());
+                        List<String> lines = Arrays.asList(content.split("\n"));
+                        List<String> validLines = lines.stream()
+                                .filter(line -> !line.trim().isEmpty() && !line.startsWith("#"))
+                                .collect(Collectors.toList());
+
+                        fileInfo.put("validFormat", true);
+                        fileInfo.put("totalLines", lines.size());
+                        fileInfo.put("entryCount", validLines.size());
+                        fileInfo.put("commentLines", lines.size() - validLines.size());
+
+                        // Try parsing a few entries to validate format
+                        int validEntries = 0;
+                        int invalidEntries = 0;
+                        for (String line : validLines) {
+                            try {
+                                IndexService.IndexEntry.fromGitIndexLine(line);
+                                validEntries++;
+                            } catch (Exception e) {
+                                invalidEntries++;
+                            }
+                        }
+                        fileInfo.put("validEntries", validEntries);
+                        fileInfo.put("invalidEntries", invalidEntries);
+
                     } else {
-                        fileInfo.put("validJson", true);
+                        fileInfo.put("validFormat", true);
                         fileInfo.put("entryCount", 0);
+                        fileInfo.put("totalLines", 0);
+                        fileInfo.put("commentLines", 0);
                     }
                 } catch (Exception e) {
-                    fileInfo.put("validJson", false);
+                    fileInfo.put("validFormat", false);
                     fileInfo.put("parseError", e.getMessage());
                 }
             }
@@ -365,46 +435,43 @@ public class AddController {
         logger.info("Getting index entries for workbook: {}", workbookId);
 
         try {
-            Path indexPath = Paths.get(".VCS", "index");
+            // Use IndexService to get entries for workbook
+            List<IndexService.IndexEntry> entries = indexService.getStagedEntriesForWorkbook(workbookId);
 
-            if (!Files.exists(indexPath)) {
-                return ResponseEntity.ok(Map.of(
-                        "status", "not_found",
-                        "message", "Index file does not exist",
-                        "workbookId", workbookId
-                ));
-            }
-
-            String content = Files.readString(indexPath, StandardCharsets.UTF_8);
-
-            if (content.trim().isEmpty()) {
-                return ResponseEntity.ok(Map.of(
-                        "status", "empty",
-                        "message", "Index file is empty",
-                        "workbookId", workbookId,
-                        "entries", new HashMap<>()
-                ));
-            }
-
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, Object> indexData = mapper.readValue(content, Map.class);
-
-            // Filter entries for the specific workbook
-            Map<String, Object> workbookEntries = new HashMap<>();
-            for (Map.Entry<String, Object> entry : indexData.entrySet()) {
-                if (entry.getValue() instanceof Map) {
-                    Map<String, Object> entryData = (Map<String, Object>) entry.getValue();
-                    if (workbookId.equals(entryData.get("workbookId"))) {
-                        workbookEntries.put(entry.getKey(), entryData);
-                    }
-                }
-            }
+            // Convert to response format
+            List<Map<String, Object>> entryMaps = entries.stream()
+                    .map(entry -> {
+                        Map<String, Object> entryMap = new HashMap<>();
+                        entryMap.put("workbookId", entry.getWorkbookId());
+                        entryMap.put("sheetNumber", entry.getSheetNumber());
+                        entryMap.put("row", entry.getRow());
+                        entryMap.put("col", entry.getCol());
+                        entryMap.put("blobId", entry.getBlobId());
+                        entryMap.put("cellAddress", entry.getCellAddress());
+                        entryMap.put("gitPath", entry.getGitPath());
+                        entryMap.put("timestamp", entry.getTimestamp());
+                        entryMap.put("originalSize", entry.getOriginalSize());
+                        entryMap.put("compressedSize", entry.getCompressedSize());
+                        entryMap.put("key", entry.getKey());
+                        entryMap.put("gitIndexLine", entry.toGitIndexLine());
+                        return entryMap;
+                    })
+                    .collect(Collectors.toList());
 
             Map<String, Object> result = new HashMap<>();
             result.put("status", "success");
+            result.put("format", "git-like");
             result.put("workbookId", workbookId);
-            result.put("entryCount", workbookEntries.size());
-            result.put("entries", workbookEntries);
+            result.put("entryCount", entryMaps.size());
+            result.put("entries", entryMaps);
+
+            // Add sheet breakdown
+            Map<String, Long> sheetCounts = entries.stream()
+                    .collect(Collectors.groupingBy(
+                            entry -> "sheet" + entry.getSheetNumber(),
+                            Collectors.counting()
+                    ));
+            result.put("entriesBySheet", sheetCounts);
 
             return ResponseEntity.ok(result);
 
@@ -415,6 +482,104 @@ public class AddController {
                     "message", e.getMessage(),
                     "status", "error",
                     "workbookId", workbookId
+            ));
+        }
+    }
+
+    @GetMapping("/index/entries/{workbookId}/sheet/{sheetNumber}")
+    public ResponseEntity<Object> getIndexEntriesForSheet(@PathVariable String workbookId,
+                                                          @PathVariable int sheetNumber) {
+        logger.info("Getting index entries for workbook: {}, sheet: {}", workbookId, sheetNumber);
+
+        try {
+            // Use IndexService to get entries for specific sheet
+            List<IndexService.IndexEntry> entries = indexService.getStagedEntriesForSheet(workbookId, sheetNumber);
+
+            // Convert to response format
+            List<Map<String, Object>> entryMaps = entries.stream()
+                    .map(entry -> {
+                        Map<String, Object> entryMap = new HashMap<>();
+                        entryMap.put("workbookId", entry.getWorkbookId());
+                        entryMap.put("sheetNumber", entry.getSheetNumber());
+                        entryMap.put("row", entry.getRow());
+                        entryMap.put("col", entry.getCol());
+                        entryMap.put("blobId", entry.getBlobId());
+                        entryMap.put("cellAddress", entry.getCellAddress());
+                        entryMap.put("gitPath", entry.getGitPath());
+                        entryMap.put("timestamp", entry.getTimestamp());
+                        entryMap.put("originalSize", entry.getOriginalSize());
+                        entryMap.put("compressedSize", entry.getCompressedSize());
+                        entryMap.put("key", entry.getKey());
+                        entryMap.put("gitIndexLine", entry.toGitIndexLine());
+                        return entryMap;
+                    })
+                    .collect(Collectors.toList());
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "success");
+            result.put("format", "git-like");
+            result.put("workbookId", workbookId);
+            result.put("sheetNumber", sheetNumber);
+            result.put("entryCount", entryMaps.size());
+            result.put("entries", entryMaps);
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            logger.error("Failed to get index entries for workbook: {}, sheet: {}", workbookId, sheetNumber, e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to get index entries",
+                    "message", e.getMessage(),
+                    "status", "error",
+                    "workbookId", workbookId,
+                    "sheetNumber", sheetNumber
+            ));
+        }
+    }
+
+    @GetMapping("/index/git-format")
+    public ResponseEntity<Object> getIndexInGitFormat() {
+        logger.info("Getting index in Git format");
+
+        try {
+            List<String> gitLines = indexService.getIndexContentAsGitFormat();
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "success");
+            result.put("format", "git-like");
+            result.put("entryCount", gitLines.size());
+            result.put("gitLines", gitLines);
+            result.put("content", String.join("\n", gitLines));
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            logger.error("Failed to get index in Git format", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to get index in Git format",
+                    "message", e.getMessage(),
+                    "status", "error"
+            ));
+        }
+    }
+
+    @GetMapping("/index/stats")
+    public ResponseEntity<Object> getIndexStatistics() {
+        logger.info("Getting index statistics");
+
+        try {
+            Map<String, Object> stats = indexService.getIndexStats();
+            stats.put("status", "success");
+            stats.put("format", "git-like");
+
+            return ResponseEntity.ok(stats);
+
+        } catch (Exception e) {
+            logger.error("Failed to get index statistics", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Failed to get index statistics",
+                    "message", e.getMessage(),
+                    "status", "error"
             ));
         }
     }

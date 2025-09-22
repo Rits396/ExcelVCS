@@ -231,7 +231,7 @@ public class AddService {
         }
     }
 
-    private static String bytesToHex(byte[] bytes) {
+    static String bytesToHex(byte[] bytes) {
         Logger hexLogger = LoggerFactory.getLogger(AddService.class.getName() + ".hex");
 
         if (bytes == null || bytes.length == 0) {

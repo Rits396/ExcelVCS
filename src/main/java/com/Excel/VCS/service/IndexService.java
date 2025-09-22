@@ -1,7 +1,6 @@
 package com.Excel.VCS.service;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -26,7 +25,10 @@ public class IndexService {
     private static final Path INDEX_FILE_PATH = VCS_DIR.resolve("index");
     private static final String TEMP_INDEX_SUFFIX = ".tmp";
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    // Git-like format constants
+    private static final String FILE_MODE = "100644";
+    private static final String STAGE_NUMBER = "0";
+
     private final ReadWriteLock indexLock = new ReentrantReadWriteLock();
 
     /**
@@ -76,7 +78,7 @@ public class IndexService {
             this.timestamp = Instant.now().getEpochSecond();
             this.originalSize = originalSize;
             this.compressedSize = compressedSize;
-            this.cellAddress = row.toUpperCase()+ ":"+ col;
+            this.cellAddress = row.toUpperCase() + col;
         }
 
         // Getters and Setters
@@ -113,6 +115,96 @@ public class IndexService {
         @JsonIgnore
         public String getKey() {
             return workbookId + ":" + sheetNumber + ":" + row + ":" + col;
+        }
+
+        /**
+         * Generate the path in Git-like format: workbookId/sheetNumber/rowCol
+         */
+        @JsonIgnore
+        public String getGitPath() {
+            return workbookId + "/" + sheetNumber + "/" + row.toUpperCase() + col;
+        }
+
+        /**
+         * Convert to Git-like index line format:
+         * 100644 <blobId> 0    <workbookId>/<sheetNumber>/<row><col>
+         */
+        @JsonIgnore
+        public String toGitIndexLine() {
+            return String.format("%s %s %s\t%s", FILE_MODE, blobId, STAGE_NUMBER, getGitPath());
+        }
+
+        /**
+         * Parse from Git-like index line format
+         */
+        public static IndexEntry fromGitIndexLine(String line) {
+            if (line == null || line.trim().isEmpty()) {
+                return null;
+            }
+
+            String[] parts = line.split("\\s+", 4);
+            if (parts.length < 4) {
+                throw new IllegalArgumentException("Invalid index line format: " + line);
+            }
+
+            String mode = parts[0];
+            String blobId = parts[1];
+            String stage = parts[2];
+            String path = parts[3];
+
+            // Parse path: workbookId/sheetNumber/rowCol
+            String[] pathParts = path.split("/", 3);
+            if (pathParts.length != 3) {
+                throw new IllegalArgumentException("Invalid path format in index line: " + path);
+            }
+
+            String workbookId = pathParts[0];
+            int sheetNumber;
+            try {
+                sheetNumber = Integer.parseInt(pathParts[1]);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid sheet number in path: " + pathParts[1]);
+            }
+
+            String cellRef = pathParts[2];
+            // Parse cell reference (e.g., "A1", "B10", "AA100")
+            String row = "";
+            String colStr = "";
+
+            int i = 0;
+            while (i < cellRef.length() && Character.isLetter(cellRef.charAt(i))) {
+                row += cellRef.charAt(i);
+                i++;
+            }
+            while (i < cellRef.length() && Character.isDigit(cellRef.charAt(i))) {
+                colStr += cellRef.charAt(i);
+                i++;
+            }
+
+            if (row.isEmpty() || colStr.isEmpty()) {
+                throw new IllegalArgumentException("Invalid cell reference format: " + cellRef);
+            }
+
+            int col;
+            try {
+                col = Integer.parseInt(colStr);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid column number: " + colStr);
+            }
+
+            IndexEntry entry = new IndexEntry();
+            entry.setWorkbookId(workbookId);
+            entry.setSheetNumber(sheetNumber);
+            entry.setRow(row.toUpperCase());
+            entry.setCol(col);
+            entry.setBlobId(blobId);
+            entry.setTimestamp(Instant.now().getEpochSecond());
+            entry.setCellAddress(row.toUpperCase() + col);
+            // Note: originalSize and compressedSize are not stored in Git format
+            entry.setOriginalSize(0);
+            entry.setCompressedSize(0);
+
+            return entry;
         }
 
         @Override
@@ -458,7 +550,7 @@ public class IndexService {
     }
 
     /**
-     * Load index from file
+     * Load index from Git-like format file
      */
     private Map<String, IndexEntry> loadIndex() {
         try {
@@ -468,16 +560,26 @@ public class IndexService {
             }
 
             logger.debug("Loading index from file: {}", INDEX_FILE_PATH);
-            String content = Files.readString(INDEX_FILE_PATH, StandardCharsets.UTF_8);
+            List<String> lines = Files.readAllLines(INDEX_FILE_PATH, StandardCharsets.UTF_8);
 
-            if (content.trim().isEmpty()) {
-                logger.debug("Index file is empty, returning new index");
-                return new HashMap<>();
+            Map<String, IndexEntry> index = new HashMap<>();
+
+            for (String line : lines) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue; // Skip empty lines and comments
+                }
+
+                try {
+                    IndexEntry entry = IndexEntry.fromGitIndexLine(line);
+                    if (entry != null) {
+                        index.put(entry.getKey(), entry);
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to parse index line: {}", line, e);
+                    // Continue with other lines instead of failing completely
+                }
             }
-
-            // Parse JSON content
-            Map<String, IndexEntry> index = objectMapper.readValue(content,
-                    objectMapper.getTypeFactory().constructMapType(HashMap.class, String.class, IndexEntry.class));
 
             logger.debug("Loaded {} entries from index", index.size());
             return index;
@@ -492,7 +594,7 @@ public class IndexService {
     }
 
     /**
-     * Save index to file atomically
+     * Save index to file in Git-like format
      */
     private void saveIndex(Map<String, IndexEntry> index) {
         Path tempPath = INDEX_FILE_PATH.resolveSibling(INDEX_FILE_PATH.getFileName() + TEMP_INDEX_SUFFIX);
@@ -503,9 +605,14 @@ public class IndexService {
             // Ensure VCS directory exists
             Files.createDirectories(INDEX_FILE_PATH.getParent());
 
+            // Convert entries to Git-like format and sort them
+            List<String> lines = index.values().stream()
+                    .sorted(Comparator.comparing(IndexEntry::getGitPath))
+                    .map(IndexEntry::toGitIndexLine)
+                    .collect(Collectors.toList());
+
             // Write to temporary file first
-            String jsonContent = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(index);
-            Files.writeString(tempPath, jsonContent, StandardCharsets.UTF_8,
+            Files.write(tempPath, lines, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
             // Atomic move to final location
@@ -535,6 +642,27 @@ public class IndexService {
             }
 
             throw new RuntimeException("Failed to save index: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get the index content in Git format for debugging/display
+     */
+    public List<String> getIndexContentAsGitFormat() {
+        indexLock.readLock().lock();
+        try {
+            Map<String, IndexEntry> index = loadIndex();
+
+            return index.values().stream()
+                    .sorted(Comparator.comparing(IndexEntry::getGitPath))
+                    .map(IndexEntry::toGitIndexLine)
+                    .collect(Collectors.toList());
+
+        } catch (Exception e) {
+            logger.error("Failed to get index content in Git format", e);
+            throw new RuntimeException("Failed to get index content in Git format: " + e.getMessage(), e);
+        } finally {
+            indexLock.readLock().unlock();
         }
     }
 }
